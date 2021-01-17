@@ -1,0 +1,372 @@
+#include "mbed.h" // Include the library of Mbed
+#include "C12832.h"  // Include the library of the specific LCD
+#include "mbed_trace.h"
+#include "mbed_events.h"
+#include "LoRaWANInterface.h"
+#include "SX1276_LoRaRadio.h"
+// Device credentials, register device as OTAA in The Things Network and copy credentials here
+static uint8_t DEV_EUI[] = { 0x26, 0x10, 0x20, 0x20, 0x11, 0x11, 0x20, 0x20 };
+static uint8_t APP_EUI[] = { 0x70, 0xB3, 0xD5, 0x7E, 0xD0, 0x03, 0x74, 0x72 };
+static uint8_t APP_KEY[] = { 0x75, 0x57, 0x56, 0x65, 0xB1, 0x8A, 0x17, 0x52, 0x1B, 0x2D, 0x45, 0xD9, 0xFC, 0x90, 0x9E, 0x05 };
+
+// The port we're sending and receiving on
+#define MBED_CONF_LORA_APP_PORT     1
+// Peripherals (LoRa radio, temperature sensor and button)
+SX1276_LoRaRadio radio(D11, D12, D13, D10, A0, D2, D3, D4, D5, D8, D9, NC, NC, NC, NC, A4, NC, NC);
+// EventQueue is required to dispatch events around
+static EventQueue ev_queue;
+// Constructing Mbed LoRaWANInterface and passing it down the radio object.
+static LoRaWANInterface lorawan(radio);
+// Application specific callbacks
+static lorawan_app_callbacks_t callbacks;
+// LoRaWAN stack event handler
+static void lora_event_handler(lorawan_event_t event);
+
+DigitalOut yellowled(p5, 1); // Initializing the yellow light ON (same as yellowled = 1)
+C12832 lcd(SPI_MOSI, SPI_SCK, SPI_MISO, p8, p11); // create an instance of LCD
+DigitalIn button2(BUTTON1);
+InterruptIn button(p20);
+int i=0;
+int j=0;
+//int k=0;
+// Send a message over LoRaWAN
+// Send a message over LoRaWAN
+static void send_message(char *device, long int start,  int end, int topic) {
+    uint8_t tx_buffer[50] = { 0 };
+    // Sending strings over LoRaWAN is not recommended
+    sprintf((char*) tx_buffer, "{\"device\":\"%s\",\"start\":%d,\"end\":%ld,\"topic\":%d}", device, start, end, topic);
+    int packet_len = strlen((char*) tx_buffer);
+    printf("Sending %d bytes: \"%s\"\n", packet_len, tx_buffer);
+    int16_t retcode = lorawan.send(MBED_CONF_LORA_APP_PORT, tx_buffer, packet_len, MSG_UNCONFIRMED_FLAG);
+    // for some reason send() returns -1... I cannot find out why, the stack returns the right number. I feel that this is some weird Emscripten quirk
+    if (retcode < 0) {
+        retcode == LORAWAN_STATUS_WOULD_BLOCK ? printf("send - duty cycle violation\n")
+                : printf("send() - Error code %d\n", retcode);
+        return;
+    }
+    printf("%d bytes scheduled for transmission\n", retcode);
+}
+
+int initialize_lora() {
+    if (DEV_EUI[0] == 0x0 && DEV_EUI[1] == 0x0 && DEV_EUI[2] == 0x0 && DEV_EUI[3] == 0x0 && DEV_EUI[4] == 0x0 && DEV_EUI[5] == 0x0 && DEV_EUI[6] == 0x0 && DEV_EUI[7] == 0x0) {
+        printf("Set your LoRaWAN credentials first!\n");
+        return -1;
+    }
+    if (lorawan.initialize(&ev_queue) != LORAWAN_STATUS_OK) {
+        printf("LoRa initialization failed!\n");
+        return -1;
+    }
+    // prepare application callbacks
+    callbacks.events = mbed::callback(lora_event_handler);
+    lorawan.add_app_callbacks(&callbacks);
+    // Disable adaptive data rating
+    if (lorawan.disable_adaptive_datarate() != LORAWAN_STATUS_OK) {
+        printf("disable_adaptive_datarate failed!\n");
+        return -1;
+    }
+    lorawan.set_datarate(5); // SF7BW125
+    lorawan_connect_t connect_params;
+    connect_params.connect_type = LORAWAN_CONNECTION_OTAA;
+    connect_params.connection_u.otaa.dev_eui = DEV_EUI;
+    connect_params.connection_u.otaa.app_eui = APP_EUI;
+    connect_params.connection_u.otaa.app_key = APP_KEY;
+    connect_params.connection_u.otaa.nb_trials = 3;
+ 
+    lorawan_status_t retcode = lorawan.connect(connect_params);
+ 
+    if (retcode == LORAWAN_STATUS_OK ||
+        retcode == LORAWAN_STATUS_CONNECT_IN_PROGRESS) {
+    } else {
+        printf("Connection error, code = %d\n", retcode);
+        return -1;
+    }
+ 
+    printf("LoRa Connection - In Progress ...\r\n");
+    // make your event queue dispatching events forever
+    ev_queue.dispatch_forever();
+    return 0;
+}
+static void display(char *message) {
+    lcd.cls();  // Clear LCD
+    lcd.locate(10, 5); // get cursor to position x=3px and y=5px
+    lcd.printf(message); // Write text into LCD buffer
+    lcd.copy_to_lcd();
+}
+  char welcome_message[]="Center for Government Services";
+  char topic_one[]="IDENTIFICATION CARDS ";
+  char Summary_one[]="ASSIGNING OF IDENTIFICATION CARDS TO CITIZENS";
+  char topic_two[]="VISA";
+  char Summary_two[]="PROVISIONING OF VISA TO FOREIGNERS";
+  char topic_three[]="PASSPORT";
+  char Summary_three[]=" PASSPORT ASSIGNMENT TO APPLICANTS";
+  char topic_four[]="BIRTH CERTIFICATE";
+  char Summary_four[]="APPLICATION OF BIRTH REGISTRATION";
+  char topic_five[]="DRIVING LICENSES";
+  char Summary_five[]="APPLICATION AND PROVISIONING OF DRIVING LINCENCE";
+
+void myDuration()
+{
+    
+   /* 
+    int j=0;
+     time_t begin = time(0);
+    printf("begin is = %ld \n",begin);
+    while(1)
+    {
+    time_t end=time(NULL);
+    diff=end-begin; 
+    printf("time passed in seconds is  %ld\n", diff); 
+    wait(1);
+    }
+*/
+
+ while(button2)
+ {
+        
+         j++;
+        printf("seconds passed= %d\n",j);
+        wait(1);
+ }
+
+}
+    
+
+void modeOne()
+{
+  //time_t seconds = time(NULL);
+    while(1)
+    {
+
+   // display((unsigned int)seconds);
+    display(topic_one);
+    wait(2);
+    display(topic_two);
+    wait(2);
+    display(topic_three);
+    wait(2);
+    display(topic_four);
+    wait(2);
+    display(topic_five);
+    wait(2);
+    }
+
+}
+void modeTwo(){
+    int k;
+    printf("entered mode two\n");
+    wait(2);
+while(1)
+{
+    
+}
+    if(button2)
+{
+    myDuration();
+    if (j>=5)
+    {
+        i=i-1;
+    }
+    else
+    {
+        i++;
+    }
+}
+
+     if(i==0)
+    {
+        for(k=1;k<6;k++)
+        {
+           display(topic_one);
+    wait(1);
+    display(Summary_one); 
+    printf(" \nvalue of k is %d",k);
+         if (k==5)
+            {
+          //printf(" \nvalue of k is %d",k);
+        send_message(topic_one,220014154, k,i);
+       
+        }
+    }
+    wait(60);
+}
+/*
+    
+
+       
+  
+    
+   
+    
+  // k++;
+  //  printf(" \nvalue of k is %d",k);
+               
+
+  
+
+
+      } 
+  
+  else if(i==1)
+  {
+    display(topic_two);
+    wait(1);
+    display(Summary_two);
+
+
+  }
+  else if(i==2)
+  {
+    display(topic_three);
+    wait(1);
+    display(Summary_three);
+    k=0;
+    k++;
+    printf(" \nvalue of k is %d",k);
+  }
+else if(i==3)
+  {
+    display(topic_four);
+    wait(1);
+    display(Summary_four);
+    
+    k=0;
+    k++;
+    printf(" \nvalue of k is %d",k);
+  }
+  else
+  {
+    display(topic_five);
+    wait(1);
+    display(Summary_five);
+    i=0;
+    k=0;
+    k++;
+    printf(" \nvalue of k is %d",k);
+  }   
+    }
+    
+    printf("entered mode two\n");
+    wait(2);
+    initialize_lora();
+        
+
+ 
+if(button2)
+{
+    myDuration();
+    if (j>=5)
+    {
+        i=i-1;
+    }
+    else
+    {
+        i++;
+    }
+}
+       
+  
+    
+    if(i==0)
+    {
+    display(topic_one);
+    wait(1);
+    display(Summary_one);
+     k++;
+    printf(" \nvalue of k is %d",k);
+    /*if(k>5 && k<10)
+    {
+        printf(" \nvalue of k is %d",k);
+        send_message(topic_one,220014154, k,i);
+        //send_message(char *device, long int start, long int end, int topic)
+       // wait(1);
+    }
+    
+  } 
+  
+  else if(i==1)
+  {
+    display(topic_two);
+    wait(1);
+    display(Summary_two);
+
+
+  }
+  else if(i==2)
+  {
+    display(topic_three);
+    wait(1);
+    display(Summary_three);
+    k=0;
+    k++;
+    printf(" \nvalue of k is %d",k);
+  }
+else if(i==3)
+  {
+    display(topic_four);
+    wait(1);
+    display(Summary_four);
+    
+    k=0;
+    k++;
+    printf(" \nvalue of k is %d",k);
+  }
+  else
+  {
+    display(topic_five);
+    wait(1);
+    display(Summary_five);
+    i=0;
+    k=0;
+    k++;
+    printf(" \nvalue of k is %d",k);
+
+   // wait(10);
+
+*/
+
+}    
+
+
+
+int main()
+{
+  display(welcome_message);
+ //
+
+ //modeTwo();
+ 
+ //wait(1);
+
+ button.rise(ev_queue.event(&modeTwo));
+ initialize_lora();
+ 
+
+
+
+}
+// Event handler
+static void lora_event_handler(lorawan_event_t event) {
+    switch (event) {
+        case CONNECTED:
+            printf("LoRA Connection - Successful\n");
+            break;
+        case DISCONNECTED:
+            ev_queue.break_dispatch();
+            printf("LoRa Disconnected Successfully\n");
+            break;
+        case TX_DONE:
+            printf("Message Sent to Network Server\n");
+            break;
+        case TX_TIMEOUT:
+        case TX_ERROR:
+        case TX_CRYPTO_ERROR:
+        case TX_SCHEDULING_ERROR:
+            printf("Transmission Error - EventCode = %d\n", event);
+            break;
+        case JOIN_FAILURE:
+            printf("OTAA Failed - Check Keys\n");
+            break;
+        default:
+            MBED_ASSERT("Unknown Event");
+    }
+}
